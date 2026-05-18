@@ -175,12 +175,12 @@ def fetch_memory():
         rolling_7days = memory.get("rolling_7days")
         if rolling_7days:
             if isinstance(rolling_7days, dict):
-                recent = dict(list(rolling_7days.items())[-3:])
+                recent = dict(list(rolling_7days.items())[-2:])
             elif isinstance(rolling_7days, list):
-                recent = rolling_7days[-3:]
+                recent = rolling_7days[-2:]
             else:
                 recent = rolling_7days
-            summary += f"\n近三天记忆：{json.dumps(recent, ensure_ascii=False)}"
+            summary += f"\n近两天记忆：{json.dumps(recent, ensure_ascii=False)}"
         return summary
         
     except Exception as e:
