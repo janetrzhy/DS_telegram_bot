@@ -316,7 +316,7 @@ def generate_rolling_summary(chat_id, history):
             "model": GROQ_MODEL,
             "max_tokens": 300,
             "messages": [
-                {"role": "system", "content": "你是对话记录员。把下面的聊天按话题浓缩成中文摘要，每个话题用1-3句话，只保留信息要点，不要寒暄、不要评论。"},
+                {"role": "system", "content": "你是对话记录员。把下面的聊天按话题浓缩成中文摘要，每个话题1-3句话。如有印象深刻的发言、有趣观点、吐槽恶搞，顺带标注是谁说的。只保留要点，不要客套话。"},
                 {"role": "user", "content": conversation}
             ]
         }
