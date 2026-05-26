@@ -356,11 +356,13 @@ def generate_rolling_summary(chat_id, history):
     except Exception as e:
         print(f"[ERROR] 生成摘要失败: {e}")
 
-def save_history(history, chat_id, force=False):
+def save_history(history, chat_id, force=False, new_msgs=1):
     HISTORY_CACHE[chat_id] = history[-30:]
 
-    # 每累计 30 条消息做一次轻量摘要（上下文压缩），按量触发不漏话题
-    MESSAGE_COUNTER[chat_id] = MESSAGE_COUNTER.get(chat_id, 0) + 1
+    # 每累计 30 条「消息」做一次轻量摘要（上下文压缩）：阈值与窗口大小对齐，
+    # 攒满 30 条时窗口里正好是这 30 条，无缝衔接不漏话题。
+    # 注意按真实消息数累加（回复模式一轮 = 用户+bot 共 2 条），否则私聊会漏summary。
+    MESSAGE_COUNTER[chat_id] = MESSAGE_COUNTER.get(chat_id, 0) + new_msgs
     if MESSAGE_COUNTER[chat_id] >= 30:
         MESSAGE_COUNTER[chat_id] = 0
         Thread(target=generate_rolling_summary, args=(chat_id, list(HISTORY_CACHE[chat_id]))).start()
@@ -730,7 +732,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                 if random.random() < REACTION_PROBABILITY:
                     print(f"[DEBUG] 🎲 表情骰子命中，准备点 reaction")
                     send_reaction(chat_id, msg_id, text)
-            save_history(history, chat_id)  # 受 60s 节流
+            save_history(history, chat_id, new_msgs=1)  # 旁听只加了 1 条用户消息；受 60s 节流
             return
 
         print(f"[DEBUG] 🗣️ Bot 被唤醒！开始燃烧老公的算力...")
@@ -780,7 +782,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         history.append({"role": "assistant", "content": reply, "timestamp": b_time})
         
         # 💾 只有在真正开口说话的这一刻，才进行一次极其珍贵的 GitHub 存档！
-        save_history(history, chat_id, force=True)  # bot 回复时强制写入（摘要触发在 save_history 内）
+        save_history(history, chat_id, force=True, new_msgs=2)  # 用户+bot 共 2 条；摘要触发在 save_history 内
         
     except Exception as e:
         import traceback
