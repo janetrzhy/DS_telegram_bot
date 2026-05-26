@@ -324,7 +324,7 @@ def generate_rolling_summary(chat_id, history):
 
         rolling = state.get("rolling_summaries", [])
         rolling.append({"period": period, "summary": summary_text})
-        rolling = rolling[-4:]
+        rolling = rolling[-6:]
         state["rolling_summaries"] = rolling
 
         requests.patch(
