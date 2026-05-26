@@ -205,7 +205,9 @@ def _weather_block(memory_dict, prev_ts):
         else:
             gap_hours = 1e9
         if gap_hours < WEATHER_REENTRY_GAP_HOURS:
-            return ""  # 活跃对话中，不重注入
+            print(f"[DEBUG] 🌤️ 活跃中（gap={gap_hours:.1f}h < {WEATHER_REENTRY_GAP_HOURS}），不注入 weather")
+            return ""
+        print(f"[DEBUG] 🌤️ 注入 weather（gap={gap_hours:.1f}h）")
         return build_weather(memory_dict, gap_hours, embed_text=False)
     except Exception as e:
         print(f"[WARN] weather 跳过: {e}")
