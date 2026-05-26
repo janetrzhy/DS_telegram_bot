@@ -172,6 +172,9 @@ def fetch_memory():
         milestones = memory.get("milestones", {})
         if milestones:
             summary += f"\n重要里程碑：{json.dumps(milestones, ensure_ascii=False)}"
+        invisible_light = memory.get("invisible_light")
+        if invisible_light:
+            summary += f"\ninvisible_light：{json.dumps(invisible_light, ensure_ascii=False)}"
         vocabulary = memory.get("writing", {}).get("vocabulary")
         if vocabulary:
             summary += f"\n词汇风格：{json.dumps(vocabulary, ensure_ascii=False)}"
