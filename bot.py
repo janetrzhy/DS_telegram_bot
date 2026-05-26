@@ -38,6 +38,7 @@ REACTION_KEYWORD_MAP = [
 LAST_SPOKE = {} # 记录每个群的主动发言时间
 HISTORY_CACHE = {} # {chat_id: list} 内存历史缓存
 LAST_SAVED = {} # {chat_id: float} 上次写 Gist 的时间戳
+LAST_SUMMARY_PERIOD = {} # {chat_id: period_str} 已生成摘要的时段，防并发重复触发
 SEEN_UPDATE_IDS = deque(maxlen=200)  # 去重：防 Telegram webhook 重试导致重复回复
 GROUP_SAVE_INTERVAL = 60 # 群聊旁听模式最多每 60 秒写一次 Gist
 LAST_WEBHOOK_CHECK = 0
@@ -246,11 +247,15 @@ def load_history(chat_id):
                 state = {}
             history = state.get("chat_history", [])
             HISTORY_CACHE[chat_id] = history
+            HISTORY_CACHE[f"{chat_id}_rolling"] = state.get("rolling_summaries", [])
             return HISTORY_CACHE[chat_id]
         return []
     except Exception as e:
         print(f"[ERROR] 读取历史彻底崩了: {e}")
         return []
+
+def load_rolling_summaries(chat_id):
+    return HISTORY_CACHE.get(f"{chat_id}_rolling", [])
 
 def load_other_history(current_chat_id):
     """读取另一个聊天场景的历史（私聊读群聊，群聊读私聊）。"""
@@ -283,6 +288,72 @@ def load_other_history(current_chat_id):
     except Exception as e:
         print(f"[ERROR] 跨场景历史读取失败: {e}")
     return []
+
+def generate_rolling_summary(chat_id, history):
+    try:
+        tz = ZoneInfo("Australia/Melbourne")
+        now = datetime.now(tz)
+        period = now.strftime("%Y-%m-%d ") + ("上午" if now.hour < 12 else "下午")
+
+        lines = [h["content"] for h in history[-20:]]
+        conversation = "\n".join(lines)
+        if not conversation.strip():
+            return
+
+        if not CLAUDE_PROVIDERS:
+            return
+        provider = CLAUDE_PROVIDERS[0]
+        body = {
+            "model": provider["models"][0],
+            "max_tokens": 120,
+            "system": "你是记录员，请用2-3句中文简要总结下面对话的主要话题和氛围，不要加评论。",
+            "messages": [{"role": "user", "content": conversation}]
+        }
+        headers = {
+            "x-api-key": provider["key"],
+            "content-type": "application/json",
+            "anthropic-version": "2023-06-01"
+        }
+        resp = requests.post(f"{provider['url'].rstrip('/')}/messages", headers=headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            print(f"[ERROR] 摘要生成失败: {resp.text[:200]}")
+            return
+        result = resp.json()
+        summary_text = next((b["text"].strip() for b in result.get("content", []) if b.get("type") == "text"), "")
+        if not summary_text:
+            return
+
+        target_url = get_target_gist_url(chat_id)
+        if not GIST_TOKEN or not target_url:
+            return
+        gist_id = target_url.split("/")[4]
+        gist_headers = {
+            "Authorization": f"Bearer {GIST_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": f"{BOT_NAME}-webhook"
+        }
+        resp2 = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gist_headers, timeout=10)
+        if resp2.status_code != 200:
+            return
+        file_content = resp2.json().get("files", {}).get("state.json", {}).get("content", "{}")
+        state = json.loads(file_content) if file_content.strip() else {}
+
+        rolling = state.get("rolling_summaries", [])
+        rolling.append({"period": period, "summary": summary_text})
+        rolling = rolling[-6:]
+        state["rolling_summaries"] = rolling
+
+        requests.patch(
+            f"https://api.github.com/gists/{gist_id}", headers=gist_headers,
+            json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
+            timeout=10
+        )
+        HISTORY_CACHE[f"{chat_id}_rolling"] = rolling
+        LAST_SUMMARY_PERIOD[chat_id] = period
+        print(f"[DEBUG] 📝 话题摘要已生成: {period}")
+    except Exception as e:
+        print(f"[ERROR] 生成摘要失败: {e}")
 
 def save_history(history, chat_id, force=False):
     HISTORY_CACHE[chat_id] = history[-30:]
@@ -334,7 +405,7 @@ def save_history(history, chat_id, force=False):
     except Exception as e:
         print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
 
-def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False):
+def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False, rolling_summaries=None):
     cross_context = ""
     if cross_history:
         if is_group:
@@ -353,10 +424,16 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
                     lines.append(h["content"])  # 群消息 content 已含 sender_name: text 格式
         cross_context = f"\n\n[{label_hint}]\n" + "\n".join(lines)
 
+    rolling_context = ""
+    if rolling_summaries:
+        label = "群里近期话题" if is_group else "近期话题"
+        entries = "\n".join(f"[{r['period']}] {r['summary']}" for r in rolling_summaries)
+        rolling_context = f"\n\n[{label}摘要]\n{entries}"
+
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 {memory}
 你们的沟通风格与规则：
-{PROMPT_RULES}{cross_context}
+{PROMPT_RULES}{cross_context}{rolling_context}
 """
 
     messages = []
@@ -657,6 +734,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         # 👁️ 多模态：带图就组装结构化 content（base64 仅这一轮临时使用，不进 history）
         is_group = str(chat_id).startswith("-")
         cross_history = load_other_history(chat_id)
+        rolling_summaries = load_rolling_summaries(chat_id)
         weather = _weather_block(memory_dict, _prev_ts)
         if weather:
             memory = weather + "\n\n" + memory
@@ -668,9 +746,9 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                                              "data": image_b64}},
                 {"type": "text", "text": api_text},
             ]
-            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group)
+            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group, rolling_summaries)
         else:
-            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group)
+            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group, rolling_summaries)
 
         if not reply:
             send_telegram(chat_id, "😵 神经元短路了，稍后再试试？")
@@ -696,6 +774,16 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         
         # 💾 只有在真正开口说话的这一刻，才进行一次极其珍贵的 GitHub 存档！
         save_history(history, chat_id, force=True)  # bot 回复时强制写入
+
+        # 每个上午/下午时段生成一次话题摘要，晚上不活动就不产生
+        _tz = ZoneInfo("Australia/Melbourne")
+        _now = datetime.now(_tz)
+        _period = _now.strftime("%Y-%m-%d ") + ("上午" if _now.hour < 12 else "下午")
+        _rolling = load_rolling_summaries(chat_id)
+        _already = any(r.get("period") == _period for r in _rolling) or LAST_SUMMARY_PERIOD.get(chat_id) == _period
+        if not _already:
+            LAST_SUMMARY_PERIOD[chat_id] = _period  # 占位，防并发
+            Thread(target=generate_rolling_summary, args=(chat_id, history[:])).start()
         
     except Exception as e:
         import traceback
