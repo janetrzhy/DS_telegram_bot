@@ -14,7 +14,9 @@ GITHUB_FILE = os.environ.get("GITHUB_FILE", "memory.json")
 GITHUB_API = f"https://api.github.com/gists/{GIST_ID}" if GIST_ID else ""
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
-VA_RE = re.compile(r"v(-?\d+(?:\.\d+)?)\s+a(-?\d+(?:\.\d+)?)")
+_NUM = r"(-?\d+(?:\.\d+)?)"
+# 支持 "v0.5 a0.35" 和趋势式 "v-0.3→0.5 a0.45→0.35"（箭头 → 或 ->）
+VA_RE = re.compile(rf"v\s*{_NUM}(?:\s*(?:→|->)\s*{_NUM})?\s+a\s*{_NUM}(?:\s*(?:→|->)\s*{_NUM})?")
 
 # ---- 关系天气 可调参数 ----
 BASELINE_AROUSAL = 0.30      # 休息态唤醒度（手动压低，不取 milestone 平均）
@@ -50,8 +52,13 @@ def read_memory():
 
 # ---- 关系天气组装 ----
 def parse_va(s):
+    # 取末值：趋势的终点 = 收尾状态（无趋势时终点就是起点）
     m = VA_RE.search(s)
-    return (float(m.group(1)), float(m.group(2))) if m else None
+    if not m:
+        return None
+    v = float(m.group(2) if m.group(2) is not None else m.group(1))
+    a = float(m.group(4) if m.group(4) is not None else m.group(3))
+    return (v, a)
 
 
 def date_entries(d):
