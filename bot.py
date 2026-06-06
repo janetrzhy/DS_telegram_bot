@@ -395,7 +395,7 @@ def generate_rolling_summary(chat_id, history):
         print(f"[ERROR] 生成摘要失败: {e}")
 
 def save_history(history, chat_id, force=False, new_msgs=1):
-    HISTORY_CACHE[chat_id] = history[-30:]
+    HISTORY_CACHE[chat_id] = history[-15:]
 
     # 轻量摘要（上下文压缩）：用独立 buffer 攒「自上次摘要以来」的全部新消息，
     # 与提示词窗口（只保留 30 条）解耦——这样群聊阈值即便设到 50，也不会因为
@@ -437,7 +437,7 @@ def save_history(history, chat_id, force=False, new_msgs=1):
         else:
             state = {}
 
-        state["chat_history"] = history[-30:]
+        state["chat_history"] = history[-15:]
 
         patch_resp = requests.patch(
             f"https://api.github.com/gists/{gist_id}",
@@ -486,9 +486,10 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 """
 
     messages = []
-    for h in history[-30:]:
+    for h in history[-15:]:
         time_prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
         entry_content = f"{time_prefix}{h['content']}"
+        if len(entry_content) > 500: entry_content = entry_content[:500] + "…[截断]"
         if messages and messages[-1]["role"] == h["role"]:
             messages[-1]["content"] += f"\n{entry_content}"
         else:
