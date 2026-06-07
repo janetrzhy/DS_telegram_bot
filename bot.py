@@ -290,7 +290,6 @@ def load_history(chat_id):
                 state = {}
             history = state.get("chat_history", [])
             HISTORY_CACHE[chat_id] = history
-            HISTORY_CACHE[f"{chat_id}_rolling"] = state.get("rolling_summaries", [])
             return HISTORY_CACHE[chat_id]
         return []
     except Exception as e:
