@@ -509,33 +509,28 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
         print("[ERROR] 没有配置任何 Claude provider")
         return None
 
-    body_base = {"max_tokens": 300, "system": system, "messages": messages}
+    # system 塞进 messages 数组第一位（OpenAI 兼容格式）
+    api_messages = [{"role": "system", "content": system}] + messages
+    body_base = {"max_tokens": 300, "messages": api_messages}
 
     for idx, provider in enumerate(CLAUDE_PROVIDERS, start=1):
         try:
             headers = {
-                "x-api-key": provider["key"],
-                "content-type": "application/json",
-                "anthropic-version": "2023-06-01"
+                "Authorization": f"Bearer {provider['key']}",
+                "Content-Type": "application/json",
             }
             body = {**body_base, "model": random.choice(provider["models"])}
             base = provider["url"].rstrip("/")
-            resp = requests.post(f"{base}/messages", headers=headers, json=body, timeout=120)
+            resp = requests.post(f"{base}/chat/completions", headers=headers, json=body, timeout=120)
             if resp.status_code != 200:
                 print(f"[ERROR] provider#{idx} HTTP {resp.status_code}: {resp.text[:200]}")
                 continue
             result = resp.json()
-            if "content" in result:
-                for block in result["content"]:
-                    if block.get("type") == "text":
-                        if idx > 1:
-                            print(f"[INFO] ✅ provider#{idx} 救场成功")
-                        return re.sub(r'\n{2,}', '\n', block["text"].strip())
-            elif "choices" in result:
+            if "choices" in result:
                 if idx > 1:
                     print(f"[INFO] ✅ provider#{idx} 救场成功")
                 return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
-            print(f"[ERROR] provider#{idx} 响应没 text 块: {str(result)[:200]}")
+            print(f"[ERROR] provider#{idx} 响应没 choices: {str(result)[:200]}")
         except Exception as e:
             print(f"[ERROR] provider#{idx} 异常: {e}")
 
