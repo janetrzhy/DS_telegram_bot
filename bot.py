@@ -38,9 +38,10 @@ REACTION_KEYWORD_MAP = [
 LAST_SPOKE = {} # 记录每个群的主动发言时间
 HISTORY_CACHE = {} # {chat_id: list} 内存历史缓存
 LAST_SAVED = {} # {chat_id: float} 上次写 Gist 的时间戳
-SUMMARY_BUFFER = {} # {chat_id: list} 自上次摘要以来累计的新消息，攒够阈值就压缩成一条摘要
-SUMMARY_THRESHOLD_GROUP = 50 # 群聊每 50 条消息摘要一次
-SUMMARY_THRESHOLD_PRIVATE = 30 # 私聊每 30 条消息摘要一次
+ # {chat_id: list} 自上次摘要以来累计的新消息，攒够阈值就压缩成一条摘要
+ # 群聊每 50 条消息摘要一次
+SUMMARY_TRIGGER_COUNT = 30
+MAX_SUMMARIES = 10 # 私聊每 30 条消息摘要一次
 SEEN_UPDATE_IDS = deque(maxlen=200)  # 去重：防 Telegram webhook 重试导致重复回复
 GROUP_SAVE_INTERVAL = 60 # 群聊旁听模式最多每 60 秒写一次 Gist
 LAST_WEBHOOK_CHECK = 0
@@ -300,7 +301,7 @@ def load_rolling_summaries(chat_id):
     cached = HISTORY_CACHE.get(f"{chat_id}_rolling")
     if cached is not None:
         return cached
-    # 从 summaries.json 读取
+    # 从 state.json 的 summaries 字段读取（与 save_history 同步写入，无竞态）
     target_url = get_target_gist_url(chat_id)
     if not GIST_TOKEN or not target_url:
         return []
@@ -314,15 +315,15 @@ def load_rolling_summaries(chat_id):
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code == 200:
-            content = resp.json().get("files", {}).get("summaries.json", {}).get("content", "[]")
-            try:
-                rolling = json.loads(content) if content.strip() else []
-            except json.JSONDecodeError:
-                rolling = []
-            if not isinstance(rolling, list):
-                rolling = []
-            HISTORY_CACHE[f"{chat_id}_rolling"] = rolling
-            return rolling
+            state_raw = resp.json().get("files", {}).get("state.json", {}).get("content", "{}")
+            if state_raw.strip():
+                try:
+                    data = json.loads(state_raw)
+                    rolling = data.get("summaries", []) or []
+                    HISTORY_CACHE[f"{chat_id}_rolling"] = rolling
+                    return rolling
+                except json.JSONDecodeError:
+                    pass
     except Exception as e:
         print(f"[ERROR] 读取 summaries 失败: {e}")
     return []
@@ -359,94 +360,48 @@ def load_other_history(current_chat_id):
         print(f"[ERROR] 跨场景历史读取失败: {e}")
     return []
 
-def generate_rolling_summary(chat_id, history):
+def summarize_messages(messages):
+    """Call Groq llama to summarize messages"""
+    if not GROQ_KEY or not messages:
+        return None
     try:
-        if not GROQ_KEY:
-            print("[WARNING] 没配 GROQ_KEY，跳过话题摘要")
-            return
-
-        lines = [h["content"] for h in history if h.get("content")]
-        conversation = "\n".join(lines)
-        if not conversation.strip():
-            return
-
-        tz = ZoneInfo("Australia/Melbourne")
-        label = datetime.now(tz).strftime("%Y-%m-%d %H:%M")
-
+        lns = []
+        for m in messages:
+            role = "me" if m.get("role") == "assistant" else "you"
+            ts = m.get("timestamp", "")
+            cnt = (m.get("content") or "").strip()
+            if not cnt:
+                continue
+            lns.append(f"[{ts}] {role}: {cnt}")
+        if not lns:
+            return None
+        prompt = "summarize the following chat in Chinese:\n\n" + "\n".join(lns)
         body = {
             "model": GROQ_MODEL,
             "max_tokens": 300,
-            "messages": [
-                {"role": "system", "content": "你是对话记录员。把下面的聊天按话题浓缩成中文摘要，每个话题1-3句话。如有印象深刻的发言、有趣观点、吐槽恶搞，顺带标注是谁说的。只保留要点，不要客套话。"},
-                {"role": "user", "content": conversation}
-            ]
+            "messages": [{"role": "user", "content": prompt}]
         }
-        headers = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
-        resp = requests.post(f"{GROQ_URL.rstrip('/')}/chat/completions", headers=headers, json=body, timeout=30)
+        hdrs = {"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"}
+        resp = requests.post(f"{GROQ_URL.rstrip(chr(47))}/chat/completions", headers=hdrs, json=body, timeout=30)
         if resp.status_code != 200:
-            print(f"[ERROR] Groq 摘要失败 {resp.status_code}: {resp.text[:200]}")
-            return
-        summary_text = resp.json()["choices"][0]["message"]["content"].strip()
-        if not summary_text:
-            return
-
-        target_url = get_target_gist_url(chat_id)
-        if not GIST_TOKEN or not target_url:
-            return
-        gist_id = target_url.split("/")[4]
-        gist_headers = {
-            "Authorization": f"Bearer {GIST_TOKEN}",
-            "Accept": "application/vnd.github.v3+json",
-            "Content-Type": "application/json",
-            "User-Agent": f"{BOT_NAME}-webhook"
-        }
-        resp2 = requests.get(f"https://api.github.com/gists/{gist_id}", headers=gist_headers, timeout=10)
-        if resp2.status_code != 200:
-            return
-        # 读/写独立的 summaries.json，避免与 save_history 的 state.json 写入冲突
-        file_content2 = resp2.json().get("files", {}).get("summaries.json", {}).get("content", "[]")
-        try:
-            rolling = json.loads(file_content2) if file_content2.strip() else []
-        except json.JSONDecodeError:
-            rolling = []
-        if not isinstance(rolling, list):
-            rolling = []
-
-        rolling.append({"period": label, "summary": summary_text})
-        rolling = rolling[-10:]
-
-        requests.patch(
-            f"https://api.github.com/gists/{gist_id}", headers=gist_headers,
-            json={"files": {"summaries.json": {"content": json.dumps(rolling, ensure_ascii=False, indent=2)}}},
-            timeout=10
-        )
-        print(f"[DEBUG] 📝 Groq 话题摘要已生成 ({label})")
+            print(f"[ERROR] Groq summary failed {resp.status_code}")
+            return None
+        text = resp.json()["choices"][0]["message"]["content"].strip()
+        return text if text else None
     except Exception as e:
-        print(f"[ERROR] 生成摘要失败: {e}")
+        print(f"[ERROR] summary failed: {e}")
+        return None
 
 def save_history(history, chat_id, force=False, new_msgs=1):
     HISTORY_CACHE[chat_id] = history[-30:]
-
-    # 轻量摘要（上下文压缩）：用独立 buffer 攒「自上次摘要以来」的全部新消息，
-    # 与提示词窗口（只保留 30 条）解耦——这样群聊阈值即便设到 50，也不会因为
-    # 窗口只有 30 而丢掉中间的消息。攒够阈值就整批压缩成一条摘要，无缝衔接。
-    buf = SUMMARY_BUFFER.setdefault(chat_id, [])
-    buf.extend(history[-new_msgs:])  # 刚 append 进来的就是末尾这 new_msgs 条
-    threshold = SUMMARY_THRESHOLD_GROUP if str(chat_id).startswith("-") else SUMMARY_THRESHOLD_PRIVATE
-    if len(buf) >= threshold:
-        Thread(target=generate_rolling_summary, args=(chat_id, list(buf))).start()
-        SUMMARY_BUFFER[chat_id] = []
-
     if not force and str(chat_id).startswith("-"):
         current_time = time.time()
         if current_time - LAST_SAVED.get(chat_id, 0) < GROUP_SAVE_INTERVAL:
-            print(f"[DEBUG] 💤 群聊节流，跳过 Gist 写入")
+            print("[DEBUG] skip gist write - throttle")
             return
-
     target_url = get_target_gist_url(chat_id)
     if not GIST_TOKEN or not target_url:
         return
-
     try:
         gist_id = target_url.split("/")[4]
         headers = {
@@ -455,36 +410,53 @@ def save_history(history, chat_id, force=False, new_msgs=1):
             "Content-Type": "application/json",
             "User-Agent": f"{BOT_NAME}-webhook"
         }
-
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
+        state = None
         if resp.status_code == 200:
-            result = resp.json()
-            content = result.get("files", {}).get("state.json", {}).get("content", "{}")
-            try:
-                state = json.loads(content) if content.strip() else {}
-            except json.JSONDecodeError:
+            rcnt = resp.json().get("files", {}).get("state.json", {}).get("content", "")
+            if not rcnt.strip():
                 state = {}
-        else:
+            else:
+                try:
+                    state = json.loads(rcnt)
+                except json.JSONDecodeError:
+                    state = {}
+        elif resp.status_code == 404:
             state = {}
-
+        else:
+            print(f"[WARN] bad state (HTTP {resp.status_code})")
+            return
+        summaries = state.get("summaries", []) or []
+        anchor = (summaries[-1].get("covers_until") if summaries else "") or ""
+        uncovered = [h for h in history if (h.get("timestamp") or "") > anchor]
+        while len(uncovered) >= SUMMARY_TRIGGER_COUNT:
+            batch = uncovered[:SUMMARY_TRIGGER_COUNT]
+            text = summarize_messages(batch)
+            if not text:
+                break
+            summaries.append({
+                "covers_until": batch[-1].get("timestamp", "") or "",
+                "text": text,
+            })
+            uncovered = uncovered[SUMMARY_TRIGGER_COUNT:]
+        summaries = summaries[-MAX_SUMMARIES:]
+        state["summaries"] = summaries
         state["chat_history"] = history[-30:]
-
         patch_resp = requests.patch(
             f"https://api.github.com/gists/{gist_id}",
             headers=headers,
             json={"files": {"state.json": {"content": json.dumps(state, ensure_ascii=False, indent=2)}}},
             timeout=10
         )
-
         if patch_resp.status_code != 200:
-            print(f"[ERROR] 保存历史被 Gist 拒绝了: {patch_resp.text}")
+            print(f"[ERROR] gist patch failed: {patch_resp.text}")
         else:
             LAST_SAVED[chat_id] = time.time()
-
+            HISTORY_CACHE[f"{chat_id}_rolling"] = summaries
     except Exception as e:
-        print(f"[ERROR] 保存历史时遭遇毁灭性打击: {e}")
+        print(f"[ERROR] save failed: {e}")
 
-def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False, rolling_summaries=None):
+def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False, summaries=None):
     cross_context = ""
     if cross_history:
         if is_group:
@@ -504,9 +476,9 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
         cross_context = f"\n\n[{label_hint}]\n" + "\n".join(lines)
 
     rolling_context = ""
-    if rolling_summaries:
+    if summaries:
         label = "群里近期话题" if is_group else "近期话题"
-        entries = "\n".join(f"[{r['period']}] {r['summary']}" for r in rolling_summaries)
+        entries = "\n".join(f"[{r['period']}] {r['summary']}" for r in summaries)
         rolling_context = f"\n\n[{label}摘要]\n{entries}"
 
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
@@ -814,7 +786,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         # 👁️ 多模态：带图就组装结构化 content（base64 仅这一轮临时使用，不进 history）
         is_group = str(chat_id).startswith("-")
         cross_history = load_other_history(chat_id)
-        rolling_summaries = load_rolling_summaries(chat_id)
+        summaries = load_rolling_summaries(chat_id)
         weather = _weather_block(memory_dict, _prev_ts)
         if weather:
             memory = weather + "\n\n" + memory
@@ -830,9 +802,9 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                                              "data": image_b64}},
                 {"type": "text", "text": api_text},
             ]
-            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group, rolling_summaries)
+            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group, summaries)
         else:
-            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group, rolling_summaries)
+            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group, summaries)
 
         if not reply:
             send_telegram(chat_id, "😵 神经元短路了，稍后再试试？")
