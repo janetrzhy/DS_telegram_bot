@@ -95,6 +95,7 @@ GROUP_STATE_GIST_URL = os.environ.get("GROUP_STATE_GIST_URL", "") # 群聊专属
 GIST_TOKEN = os.environ.get("GIST_TOKEN", "")
 
 BOT_NAME = os.environ.get("BOT_NAME", "AI助手")
+_BOT_UA = BOT_NAME.encode("ascii", "ignore").decode() or "bot"  # HTTP 头必须 ASCII，否则 urllib3 炸
 USER_NAME = os.environ.get("USER_NAME", "主人")
 OWNER_TG_NAME = os.environ.get("OWNER_TG_NAME", USER_NAME)  # Telegram 显示名，用于识别主人发言
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "") # 机器人的用户名，用于群聊被@唤醒
@@ -153,7 +154,7 @@ def fetch_memory():
         headers = {
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": f"{_BOT_UA}-webhook"
         }
         
         # 带着令牌，堂堂正正走官方 API 大门！
@@ -278,7 +279,7 @@ def load_history(chat_id):
         headers = {
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": f"{_BOT_UA}-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -314,7 +315,7 @@ def load_rolling_summaries(chat_id):
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": f"{_BOT_UA}-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code == 200:
@@ -347,7 +348,7 @@ def load_other_history(current_chat_id):
         headers = {
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": f"{_BOT_UA}-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         if resp.status_code != 200:
@@ -411,7 +412,7 @@ def save_history(history, chat_id, force=False, new_msgs=1):
             "Authorization": f"Bearer {GIST_TOKEN}",
             "Accept": "application/vnd.github.v3+json",
             "Content-Type": "application/json",
-            "User-Agent": f"{BOT_NAME}-webhook"
+            "User-Agent": f"{_BOT_UA}-webhook"
         }
         resp = requests.get(f"https://api.github.com/gists/{gist_id}", headers=headers, timeout=10)
         state = None
