@@ -515,7 +515,7 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 """
 
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
-{memory}
+以下是作为参考的过往交互记录：{memory}
 你们的沟通风格与规则：
 {PROMPT_RULES}{group_identity_rules}{cross_context}{rolling_context}
 """
