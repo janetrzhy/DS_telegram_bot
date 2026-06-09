@@ -492,7 +492,7 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 
     # system 塞进 messages 数组第一位（OpenAI 兼容格式）
     api_messages = [{"role": "system", "content": system}] + messages
-    body_base = {"max_tokens": 300, "messages": api_messages}
+    body_base = {"max_tokens": 1024, "messages": api_messages}
 
     for idx, provider in enumerate(CLAUDE_PROVIDERS, start=1):
         try:
