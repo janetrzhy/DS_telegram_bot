@@ -826,6 +826,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         # dream_block = _try_surface_dream(memory_dict, chat_id, text or formatted_input)
         # if dream_block:
         #     memory = memory + "\n\n" + dream_block
+        print(f"[DEBUG] 🧠 memory 注入 system prompt，长度={len(memory)}")
         if image_b64:
             api_text = formatted_input or "看看这张图"
             user_content = [
