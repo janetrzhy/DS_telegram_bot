@@ -513,11 +513,10 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 - 你只代表{BOT_NAME}发言；不要把某个群友的话当成{USER_NAME}或你自己说的。
 - `[回复 发言人: 原文]` 表示当前发言人在引用另一个人的消息；被引用的人和当前发言人要分清。
 """
-
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
-以下是作为参考的过往交互记录：{memory}
 你们的沟通风格与规则：
 {PROMPT_RULES}{group_identity_rules}{cross_context}{rolling_context}
+以下是作为参考的过往交互记录：{memory}
 """
 
     messages = []
