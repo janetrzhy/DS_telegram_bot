@@ -527,9 +527,21 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
                 continue
             result = resp.json()
             if "choices" in result:
+                choice = result["choices"][0]
+                content = choice["message"]["content"].strip()
+                finish = choice.get("finish_reason", "?")
+                usage = result.get("usage", {})
+                ctx = (f"finish={finish}"
+                       f" out={usage.get('completion_tokens', '?')}tk"
+                       f" in={usage.get('prompt_tokens', '?')}tk"
+                       f" len={len(content)}")
+                if finish != "stop":
+                    print(f"[WARN] provider#{idx} 非正常结束！{ctx}")
+                else:
+                    print(f"[DEBUG] provider#{idx} {ctx}")
                 if idx > 1:
                     print(f"[INFO] ✅ provider#{idx} 救场成功")
-                return re.sub(r'\n{2,}', '\n', result["choices"][0]["message"]["content"].strip())
+                return re.sub(r'\n{2,}', '\n', content)
             print(f"[ERROR] provider#{idx} 响应没 choices: {str(result)[:200]}")
         except Exception as e:
             print(f"[ERROR] provider#{idx} 异常: {e}")
