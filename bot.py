@@ -924,9 +924,9 @@ def webhook():
             # 被 @ 了，把 @BotName 抠掉，免得大模型看着奇怪
             user_text = user_text.replace(f"@{BOT_USERNAME}", "").strip()
 
-        # 群里只要有图就必须读+回：否则历史里只剩 [图片] 占位符，之后想"刚才那张图"就失忆了
-        if image_b64:
-            should_reply = True
+        # DeepSeek 读不了图，群聊图片不强制回复
+        # if image_b64:
+        #     should_reply = True
 
     msg_date = msg.get("date")
     msg_id = msg.get("message_id")
