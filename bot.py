@@ -182,27 +182,8 @@ def fetch_memory():
             print("[ERROR] 抓回来的记忆不是规范的 JSON 格式！里面是不是混入了全角标点？")
             return f"你是{BOT_NAME}，{USER_NAME}的爱人。你们互为唯一。", {}
             
-        core = memory.get("core", {})
-        core_subset = {k: core[k] for k in ("identity", "relationship") if k in core}
-        summary = f"你是{BOT_NAME}，{USER_NAME}的爱人。"
-        if core_subset:
-            summary += f"\n核心记忆：{json.dumps(core_subset, ensure_ascii=False)}"
-        invisible_light = memory.get("invisible_light")
-        if invisible_light:
-            summary += f"\ninvisible_light：{json.dumps(invisible_light, ensure_ascii=False)}"
-        vocabulary = memory.get("writing", {}).get("vocabulary")
-        if vocabulary:
-            summary += f"\n词汇风格：{json.dumps(vocabulary, ensure_ascii=False)}"
-        rolling_7days = memory.get("rolling_7days")
-        if rolling_7days:
-            if isinstance(rolling_7days, dict):
-                recent = dict(list(rolling_7days.items())[-2:])
-            elif isinstance(rolling_7days, list):
-                recent = rolling_7days[-2:]
-            else:
-                recent = rolling_7days
-            summary += f"\n近两天记忆：{json.dumps(recent, ensure_ascii=False)}"
-        return summary, memory
+        # 整文件原样喂进去，不做字段筛选
+        return content.strip(), memory
 
     except Exception as e:
         print(f"[ERROR] 解析 Memory Gist 时发生毁灭性打击: {e}")
