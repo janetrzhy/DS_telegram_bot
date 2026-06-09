@@ -122,6 +122,43 @@ GROQ_URL = os.environ.get("GROQ_BASE_URL") or os.environ.get("WHISPER_BASE_URL")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # ============ 核心函数 ============
+def _clean_identity_part(value):
+    value = str(value or "").strip()
+    value = re.sub(r"\s+", " ", value)
+    return value.replace(":", "：")
+
+def format_sender_identity(user):
+    """Build a stable group-chat speaker label from Telegram user fields."""
+    user = user or {}
+    first = _clean_identity_part(user.get("first_name"))
+    last = _clean_identity_part(user.get("last_name"))
+    username = _clean_identity_part(user.get("username"))
+    user_id = user.get("id")
+
+    display = " ".join(part for part in [first, last] if part).strip()
+    if not display:
+        display = username or "神秘人"
+
+    parts = [display]
+    if username:
+        parts.append(f"(@{username})")
+    if user_id is not None:
+        parts.append(f"[tg:{user_id}]")
+    return " ".join(parts)
+
+def is_owner_user(user):
+    user = user or {}
+    candidates = {
+        str(user.get("first_name") or "").strip(),
+        " ".join(part for part in [
+            str(user.get("first_name") or "").strip(),
+            str(user.get("last_name") or "").strip()
+        ] if part).strip(),
+        str(user.get("username") or "").strip(),
+        f"@{str(user.get('username') or '').strip()}" if user.get("username") else "",
+    }
+    return OWNER_TG_NAME in candidates
+
 def self_heal_webhook():
     global LAST_WEBHOOK_CHECK
     now = time.time()
@@ -466,10 +503,21 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
         entries = "\n".join(f"[{r.get('covers_until', '')}] {r.get('text', '')}" for r in summaries)
         rolling_context = f"\n\n[{label}摘要]\n{entries}"
 
+    group_identity_rules = ""
+    if is_group:
+        group_identity_rules = f"""
+
+群聊身份规则：
+- 历史消息格式是 `发言人标识: 内容`；冒号前面是说话的人，不是消息内容。
+- 新消息里的发言人标识可能包含显示名、@username 和 [tg:id]。同名时优先看 @username 和 [tg:id]，不要把不同标识的人合并成同一个人。
+- 你只代表{BOT_NAME}发言；不要把某个群友的话当成{USER_NAME}或你自己说的。
+- `[回复 发言人: 原文]` 表示当前发言人在引用另一个人的消息；被引用的人和当前发言人要分清。
+"""
+
     system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
 {memory}
 你们的沟通风格与规则：
-{PROMPT_RULES}{cross_context}{rolling_context}
+{PROMPT_RULES}{group_identity_rules}{cross_context}{rolling_context}
 """
 
     messages = []
@@ -733,6 +781,7 @@ def send_telegram_voice(chat_id, text, reply_to_message_id=None):
 
 # ============ 影分身后台任务 ============
 def process_message_background(text, chat_id, sender_name, msg_date=None, should_reply=True, msg_id=None,
+                               owner_speaking=False,
                                image_b64=None, image_mime=None, is_voice=False):
     try:
         tz = ZoneInfo("Australia/Melbourne")
@@ -763,7 +812,7 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                     print(f"[DEBUG] 🎯 关键词触发！")
                     should_reply = True
                     LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
-                elif random.random() < (REPLY_PROBABILITY_OWNER if sender_name == OWNER_TG_NAME else REPLY_PROBABILITY):
+                elif random.random() < (REPLY_PROBABILITY_OWNER if owner_speaking else REPLY_PROBABILITY):
                     print(f"[DEBUG] 🎲 运气爆发！准备随机插嘴。")
                     should_reply = True
                     LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
@@ -877,7 +926,7 @@ def webhook():
     replied_msg = msg.get("reply_to_message", {}) or {}
     replied_text = replied_msg.get("text", "") or replied_msg.get("caption", "")
     if replied_text:
-        replied_sender = replied_msg.get("from", {}).get("first_name", "")
+        replied_sender = format_sender_identity(replied_msg.get("from", {}))
         user_text = f"[回复 {replied_sender}: {replied_text}]\n{user_text}"
     image_b64 = None
     image_mime = None
@@ -916,7 +965,7 @@ def webhook():
         replied = msg.get("reply_to_message", {}) or {}
         replying_to_bot = bool(replied.get("from", {}).get("is_bot"))
         mentioned = bool(BOT_USERNAME) and f"@{BOT_USERNAME}" in user_text
-        owner_replying = replying_to_bot and msg.get("from", {}).get("first_name", "") == OWNER_TG_NAME
+        owner_replying = replying_to_bot and is_owner_user(msg.get("from", {}))
         if not mentioned and not owner_replying:
             # 没被 @，也不是主人回复 bot → 走冷却+概率路径（包括其他人回复 bot 的情况）
             should_reply = False
@@ -930,12 +979,14 @@ def webhook():
 
     msg_date = msg.get("date")
     msg_id = msg.get("message_id")
-    sender_name = msg.get("from", {}).get("first_name", "神秘人")
+    sender_user = msg.get("from", {})
+    sender_name = format_sender_identity(sender_user)
+    owner_speaking = is_owner_user(sender_user)
 
     # 把 should_reply 开关传给后台线程
     Thread(target=process_message_background,
            args=(user_text, chat_id, sender_name, msg_date, should_reply, msg_id,
-                 image_b64, image_mime, is_voice)).start()
+                 owner_speaking, image_b64, image_mime, is_voice)).start()
     Thread(target=self_heal_webhook).start()
     return "ok"
 
