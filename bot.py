@@ -669,9 +669,19 @@ def send_reaction(chat_id, message_id, text=""):
         print(f"[ERROR] 点表情失败: {e}")
 
 def escape_tg_markdown(text):
-    """转义 Telegram Markdown 特殊字符，防止 LLM 输出里的 _ * ` [ 被当成格式化指令"""
+    """转义 Telegram Markdown 特殊字符，但保留合法的 [text](url) 链接语法"""
+    # 先把合法的 Markdown 链接 [text](url) 保护起来
+    links = []
+    def _save(m):
+        links.append(m.group(0))
+        return f"\x00LINK{len(links)-1}\x00"
+    text = re.sub(r'\[([^\]]*)\]\(([^)]*)\)', _save, text)
+    # 转义特殊字符（此时链接里的 [ 已被占位符替代，不会误伤）
     for ch in ["\\", "_", "*", "`", "["]:
         text = text.replace(ch, "\\" + ch)
+    # 恢复链接
+    for i, link in enumerate(links):
+        text = text.replace(f"\x00LINK{i}\x00", link)
     return text
 
 def split_message(text):
