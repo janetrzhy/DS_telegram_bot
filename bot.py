@@ -9,7 +9,7 @@ import random
 import time
 from datetime import datetime
 from flask import Flask, request
-from threading import Thread
+from threading import Thread, Lock
 from zoneinfo import ZoneInfo
 # from memory_core import build_weather  # weather 暂时关闭
 # , surface_dream, mark_dream_surfaced, write_memory  # 做梦系统暂时关闭
@@ -37,6 +37,7 @@ REACTION_KEYWORD_MAP = [
     (["晚安", "睡觉", "好困"], "😴"),
 ]
 LAST_SPOKE = {} # 记录每个群的主动发言时间
+_SPOKE_LOCK = Lock() # 冷却检查的互斥锁，防高频消息时重复回复
 HISTORY_CACHE = {} # {chat_id: list} 内存历史缓存
 LAST_SAVED = {} # {chat_id: float} 上次写 Gist 的时间戳
  # {chat_id: list} 自上次摘要以来累计的新消息，攒够阈值就压缩成一条摘要
@@ -478,7 +479,7 @@ def save_history(history, chat_id, force=False, new_msgs=1):
     except Exception as e:
         print(f"[ERROR] save failed: {e}")
 
-def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False, summaries=None):
+def call_claude(user_content, memory, history, current_user_time, cross_history=None, is_group=False, summaries=None, max_tokens=1024):
     cross_context = ""
     if cross_history:
         if is_group:
@@ -539,7 +540,7 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 
     # system 塞进 messages 数组第一位（OpenAI 兼容格式）
     api_messages = [{"role": "system", "content": system}] + messages
-    body_base = {"max_tokens": 1024, "messages": api_messages}
+    body_base = {"max_tokens": max_tokens, "messages": api_messages}
 
     for idx, provider in enumerate(CLAUDE_PROVIDERS, start=1):
         try:
@@ -798,25 +799,27 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         formatted_input = f"{sender_name}: {history_text}" if str(chat_id).startswith("-") else history_text
         
        # ==========================================
-        # 🎯 社交牛逼症引擎：加装 60秒 CD 锁
+        # 🎯 社交牛逼症引擎：加装 60秒 CD 锁（带互斥，防高频重复回复）
         # ==========================================
         if not should_reply and str(chat_id).startswith("-"):
+            _SPOKE_LOCK.acquire()
             current_time = time.time()
             last_time = LAST_SPOKE.get(chat_id, 0)
-            
-            # 只有熬过了冷却时间，才允许它再次“听见”关键词或扔骰子
-            if current_time - last_time > COOLDOWN_TIME:
-                # 注意：S 的代码里变量名叫 text，二号机叫 user_text。根据你改的是哪个文件替换一下！
-                if any(word in text for word in TRIGGER_WORDS): 
-                    print(f"[DEBUG] 🎯 关键词触发！")
-                    should_reply = True
-                    LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
-                elif random.random() < (REPLY_PROBABILITY_OWNER if owner_speaking else REPLY_PROBABILITY):
-                    print(f"[DEBUG] 🎲 运气爆发！准备随机插嘴。")
-                    should_reply = True
-                    LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
-            else:
-                print(f"[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。")
+            try:
+                # 只有熬过了冷却时间，才允许它再次"听见"关键词或扔骰子
+                if current_time - last_time > COOLDOWN_TIME:
+                    if any(word in text for word in TRIGGER_WORDS):
+                        print(f"[DEBUG] 🎯 关键词触发！")
+                        should_reply = True
+                        LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
+                    elif random.random() < (REPLY_PROBABILITY_OWNER if owner_speaking else REPLY_PROBABILITY):
+                        print(f"[DEBUG] 🎲 运气爆发！准备随机插嘴。")
+                        should_reply = True
+                        LAST_SPOKE[chat_id] = current_time # 重置冷却沙漏
+                else:
+                    print(f"[DEBUG] 🛑 还在 {COOLDOWN_TIME} 秒冷却期内，强制捂住它的嘴。")
+            finally:
+                _SPOKE_LOCK.release()
 
         # 读取记忆与历史
         memory, memory_dict = fetch_memory()
@@ -855,6 +858,33 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
         # dream_block = _try_surface_dream(memory_dict, chat_id, text or formatted_input)
         # if dream_block:
         #     memory = memory + "\n\n" + dream_block
+        # 📏 简繁探测：用户要求限制字数/句数时，压低 max_tokens + 塞强制指令
+        brevity_max_tokens = None
+        brevity_note = ""
+        brevity_pattern = re.compile(
+            r"([一两两三四五六七八九十几\d]\s*[~～-]?\s*[一两两三四五六七八九十几\d\s]*[句个条字])|"
+            r"(简短|简洁|精简|简略|说重点|概括|浓缩|别啰嗦|别废话|短一点|少说两句)", re.IGNORECASE
+        )
+        search_text = formatted_input if str(chat_id).startswith("-") else text
+        if search_text and brevity_pattern.search(search_text):
+            # 从用户指令里猜上限：提取数字关键词
+            num_match = re.search(r"([一二三四五六七八九十\d])", search_text)
+            if num_match:
+                cn_map = {"一":1,"二":2,"两":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
+                raw = num_match.group(1)
+                sentence_count = cn_map.get(raw, int(raw) if raw.isdigit() else 3)
+                brevity_max_tokens = min(sentence_count * 80 + 40, 500)  # 每句~80 token，保底够用
+            else:
+                brevity_max_tokens = 250  # 没说具体数字，按~3句算
+            brevity_note = (
+                "\n\n⚠️ 强制指令：用户刚才要求你控制回复长度，必须严格遵守。"
+                f"回复用 1-3 个短句说完，不展开、不解释、不重复。说完了就停。"
+            )
+            print(f"[DEBUG] 📏 检测到简短指令，max_tokens={brevity_max_tokens}")
+
+        # 💉 把简短指令注入 system prompt（在 memory 之后追加，优先级更高）
+        memory = memory + brevity_note
+
         print(f"[DEBUG] 🧠 memory 注入 system prompt，长度={len(memory)}")
         if image_b64:
             api_text = formatted_input or "看看这张图"
@@ -864,9 +894,9 @@ def process_message_background(text, chat_id, sender_name, msg_date=None, should
                                              "data": image_b64}},
                 {"type": "text", "text": api_text},
             ]
-            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group, summaries)
+            reply = call_claude(user_content, memory, history, u_time, cross_history, is_group, summaries, max_tokens=brevity_max_tokens or 1024)
         else:
-            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group, summaries)
+            reply = call_claude(formatted_input, memory, history, u_time, cross_history, is_group, summaries, max_tokens=brevity_max_tokens or 1024)
 
         if not reply:
             send_telegram(chat_id, "😵 神经元短路了，稍后再试试？")
