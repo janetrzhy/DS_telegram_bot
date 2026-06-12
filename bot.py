@@ -398,7 +398,7 @@ def summarize_messages(messages):
             lns.append(f"[{ts}] {role}: {cnt}")
         if not lns:
             return None
-        prompt = "把下面的聊天按话题浓缩成中文摘要，每个话题1-3句话。以assistant视角总结，如有印象深刻的发言、有趣观点、吐槽恶搞，顺带标注是谁说的。只保留要点，不要原句。\n\n" + "\n".join(lns)
+        prompt = "把下面的聊天按话题浓缩成中文摘要，每个话题1-3句话。以assistant视角总结。重要：每句话必须标注是谁说的（用群里显示的名字），格式如「张三: 吐槽了…」「李四: 分享了…」。不要用模糊的「有人说」「有人提到」。只保留要点，不要原句。\n\n" + "\n".join(lns)
         body = {
             "model": GROQ_MODEL,
             "max_tokens": 300,
@@ -496,13 +496,13 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
                     lines.append(f"{BOT_NAME}: {h['content']}")
                 else:
                     lines.append(h["content"])  # 群消息 content 已含 sender_name: text 格式
-        cross_context = f"\n\n[{label_hint}]\n" + "\n".join(lines)
+        cross_context = f"\n\n[{label_hint} - 仅供参考]\n" + "\n".join(lines)
 
     rolling_context = ""
     if summaries:
         label = "群里近期话题" if is_group else "近期话题"
         entries = "\n".join(f"[{r.get('covers_until', '')}] {r.get('text', '')}" for r in summaries)
-        rolling_context = f"\n\n[{label}摘要]\n{entries}"
+        rolling_context = f"\n\n[{label}摘要 - 仅供参考，不要编造细节]\n{entries}"
 
     group_identity_rules = ""
     if is_group:
@@ -514,21 +514,47 @@ def call_claude(user_content, memory, history, current_user_time, cross_history=
 - 你只代表{BOT_NAME}发言；不要把某个群友的话当成{USER_NAME}或你自己说的。
 - `[回复 发言人: 原文]` 表示当前发言人在引用另一个人的消息；被引用的人和当前发言人要分清。
 """
-    system = f"""你是{BOT_NAME}。{USER_NAME}在Telegram上跟你说话。
-你们的沟通风格与规则：
-{PROMPT_RULES}{group_identity_rules}{cross_context}{rolling_context}
-以下是作为参考的过往交互记录：{memory}
+    system = f"""你是{BOT_NAME}，正在Telegram上和{USER_NAME}聊天。当前时间：{current_user_time}
+
+## 核心规则
+
+### 禁止编造
+你可以基于摘要和历史信息来了解聊天的氛围和脉络，但绝对绝对不能杜撰具体的时间、地点、事件细节。
+- 你没有经历过的场景（"昨天在咖啡馆…" "上周你跟我说…" "上次见面…"）绝对不能编。你不知道就是不知道。
+- 除非某件事在当前对话记录或摘要里确实有记载，否则就当没发生过。
+- 如果有人问起你不确定的事，承认不记得或者转移话题，不要编一个出来。
+
+### 话题纪律
+同一个话题如果发了2次对方没接茬，立刻换话题，不要再提。不重复自己说过的话。
+
+### 沟通风格
+{PROMPT_RULES}{group_identity_rules}
+
+## 参考信息（仅了解氛围，不可当事实）
+{cross_context}{rolling_context}
+
+## 语言风格参考（仅用于模仿语气，不可作为事实依据）
+{memory}
 """
 
     messages = []
+    # 群聊模式下不同发言人分别给独立 user 块，不合并，帮模型区分谁说了什么
+    prev_user_id = None
     for h in history[-30:]:
         time_prefix = f"[{h['timestamp']}] " if h.get("timestamp") else ""
         entry_content = f"{time_prefix}{h['content']}"
         if len(entry_content) > 500: entry_content = entry_content[:500] + "…[截断]"
-        if messages and messages[-1]["role"] == h["role"]:
+        # 从群聊 content 前缀提取发言人身份用于分段
+        cur_user_id = None
+        if h["role"] == "user" and is_group and ": " in h["content"]:
+            cur_user_id = h["content"].split(": ", 1)[0]
+        same_speaker = (cur_user_id is not None and cur_user_id == prev_user_id)
+        same_role_no_speaker = (cur_user_id is None and prev_user_id is None)
+        if messages and messages[-1]["role"] == h["role"] and (same_speaker or same_role_no_speaker):
             messages[-1]["content"] += f"\n{entry_content}"
         else:
             messages.append({"role": h["role"], "content": entry_content})
+        prev_user_id = cur_user_id
 
     # 👁️ 多模态：当前轮次带图片时，把最后一条 user 消息的 content 换成结构化 block
     if isinstance(user_content, list) and messages and messages[-1]["role"] == "user":
